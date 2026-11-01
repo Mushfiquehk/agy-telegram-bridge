@@ -1,0 +1,13 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/settings.json",
+  "agentMode": "accept-edits",
+  "permissions": {
+    "allow": [
+      "command(git)",
+      "command(regex:npm (run|test|install).*)",
+      "command(regex:(py|python) -m pytest.*)",
+      "command(dir)",
+      "command(ls)"
+    ]
+  }
+}
