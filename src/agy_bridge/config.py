@@ -47,6 +47,12 @@ def _float(name: str, value: str | None, default: float) -> float:
         raise ConfigError(f"{name} must be a number, got {value!r}") from exc
 
 
+def _path(value: str | None) -> Path | None:
+    if value is None or not value.strip():
+        return None
+    return Path(os.path.expandvars(os.path.expanduser(value.strip())))
+
+
 def split_command(cmd: str) -> list[str]:
     """Split a command string the way the current OS shell would (roughly)."""
     cmd = cmd.strip()
@@ -79,6 +85,23 @@ class Config:
     edit_interval: float = 1.5
     state_file: Path = field(default_factory=lambda: Path("data") / "state.json")
     max_upload_mb: int = 20
+    # developer tools
+    allow_shell: bool = False
+    shell: str = ""
+    shell_timeout: int = 300
+    test_command: str = ""
+    test_timeout: int = 900
+    checkpoints: bool = True
+    approval_buttons: bool = True
+    agy_settings_path: Path = field(default_factory=lambda: Path.home() / ".gemini" / "antigravity-cli" / "settings.json")
+    prompts_file: Path = field(default_factory=lambda: Path("prompts.toml"))
+    transcript_dir: Path = field(default_factory=lambda: Path("data") / "transcripts")
+    voice_backend: str = "auto"
+    openai_api_key: str = ""
+    whisper_model: str = ""
+    voice_language: str = ""
+    voice_confirm: bool = False
+    project_scan_depth: int = 3
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None, dotenv_path: str | None = None) -> "Config":
@@ -116,6 +139,9 @@ class Config:
         effort = env.get("AGY_EFFORT", "").strip()
         if effort not in VALID_EFFORTS:
             raise ConfigError(f"AGY_EFFORT must be one of {sorted(VALID_EFFORTS)}, got {effort!r}")
+        voice = env.get("VOICE_BACKEND", "auto").strip().lower() or "auto"
+        if voice not in {"auto", "local", "openai", "off"}:
+            raise ConfigError(f"VOICE_BACKEND must be auto, local, openai or off, got {voice!r}")
         run_mode = env.get("RUN_MODE", "persistent").strip() or "persistent"
         if run_mode not in VALID_RUN_MODES:
             raise ConfigError(f"RUN_MODE must be one of {sorted(VALID_RUN_MODES)}, got {run_mode!r}")
@@ -142,6 +168,22 @@ class Config:
             edit_interval=_float("EDIT_INTERVAL_SECONDS", env.get("EDIT_INTERVAL_SECONDS"), 1.5),
             state_file=Path(env.get("STATE_FILE", "") or Path("data") / "state.json"),
             max_upload_mb=_int("MAX_UPLOAD_MB", env.get("MAX_UPLOAD_MB"), 20),
+            allow_shell=_bool(env.get("ALLOW_SHELL")),
+            shell=env.get("SHELL_COMMAND", "").strip(),
+            shell_timeout=_int("SHELL_TIMEOUT_SECONDS", env.get("SHELL_TIMEOUT_SECONDS"), 300),
+            test_command=env.get("TEST_COMMAND", "").strip(),
+            test_timeout=_int("TEST_TIMEOUT_SECONDS", env.get("TEST_TIMEOUT_SECONDS"), 900),
+            checkpoints=_bool(env.get("CHECKPOINTS"), True),
+            approval_buttons=_bool(env.get("APPROVAL_BUTTONS"), True),
+            agy_settings_path=_path(env.get("AGY_SETTINGS_PATH")) or Path.home() / ".gemini" / "antigravity-cli" / "settings.json",
+            prompts_file=_path(env.get("PROMPTS_FILE")) or Path("prompts.toml"),
+            transcript_dir=_path(env.get("TRANSCRIPT_DIR")) or Path("data") / "transcripts",
+            voice_backend=(env.get("VOICE_BACKEND", "auto").strip().lower() or "auto"),
+            openai_api_key=env.get("OPENAI_API_KEY", "").strip(),
+            whisper_model=env.get("WHISPER_MODEL", "").strip(),
+            voice_language=env.get("VOICE_LANGUAGE", "").strip(),
+            voice_confirm=_bool(env.get("VOICE_CONFIRM")),
+            project_scan_depth=_int("PROJECT_SCAN_DEPTH", env.get("PROJECT_SCAN_DEPTH"), 3),
         )
 
     def is_path_allowed(self, path: Path) -> bool:

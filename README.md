@@ -49,24 +49,62 @@ So this repo is Telegram-only on purpose. (The `core` module is messenger-agnost
    Open your bot in Telegram, press **Start**, and type a request.
 7. *(Optional)* **Start at logon, hidden**: `powershell -ExecutionPolicy Bypass -File scripts\install-autostart.ps1`. Set your PC not to sleep, or the bot goes offline.
 
+## Developing from your phone
+
+A typical loop:
+
+1. `/projects` and tap a repo. Each project keeps its **own agy conversation**, so switching back resumes where you left off.
+2. Type the task: *"add rate limiting to the /login route and a test for it"*. You see each step live (`⚡ run_command: npm test`, `✏️ edit_file: src/auth.ts`) with a **⏹ Stop** button.
+3. The reply ends with **📝 3 files changed (+42 −7): src/auth.ts, …** and buttons: **📄 Diff** (exactly what agy changed in that turn), **↩️ Undo** (put the files back), **🔁 Retry**.
+4. `/test`: runs the project's tests (auto-detected). If they fail, tap **🛠 Ask agy to fix** and the failing output goes straight to agy.
+5. `/review` for a second opinion on the diff, then `/commit <msg>` (or `/commitmsg` to let agy write it) and `/push`, both behind a confirm button.
+
+More things that help:
+
+- **Approvals from Telegram.** Headless agy can't prompt you, so a blocked tool shows **✅ Retry with full access (this turn only)** and **📌 Always allow command(npm)**, which writes the rule into agy's `settings.json` (with a backup) and retries.
+- **Screenshots and logs.** Send a screenshot of a bug or a log file with a caption and agy gets the file path. Uploads go to `.telegram_uploads/` with its own `.gitignore`, so they never end up in your commits.
+- **Voice notes.** Dictate a task while walking. Transcribed locally with faster-whisper (free, private) or through OpenAI if you set a key.
+- **Parallel work.** Make a Telegram group with **Topics** turned on, add your bot as admin, and each topic gets its own agy process and project: one topic per repo, all running at once.
+- **Shortcuts.** `/review`, `/fix`, `/explain <x>`, `/plan <task>` (runs in plan mode, so no edits), `/commitmsg`, `/pr`, `/debug <error>`, `/tests <x>`, `/refactor <x>`, `/deps`. Add your own in `prompts.toml` (see [`prompts.example.toml`](prompts.example.toml)). Reply to any message with a shortcut to include that message.
+- **Remote upkeep.** `/logs` shows the bridge log, `/restart` restarts it, and `/update` pulls the latest bridge from git, reinstalls, and restarts. These need `run.ps1` or the autostart task, which restart it automatically.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
 | *(any text)* | Sent to agy as the next turn. Reply to an earlier message to quote it as context. |
-| *(file / photo + caption)* | Saved to `<workspace>/.telegram_uploads/`, and the caption is sent to agy with the path |
-| `/new` | Start a fresh conversation |
+| *(file / photo + caption)* | Saved to `<project>/.telegram_uploads/`; the caption goes to agy with the path |
+| *(voice note)* | Transcribed and sent to agy (see Voice notes in `.env.example`) |
+| **Projects** | |
+| `/projects` | Buttons for every repo under `ALLOWED_ROOTS` (recent first); `/projects refresh` rescans |
+| `/p <name>` | Switch project by (partial) name |
+| `/cwd [path\|-]` | Show or switch folder; `-` goes back to the previous project |
+| `/ls [path]`, `/tree [depth]` | List a folder, or a `.gitignore`-aware tree |
+| `/cat <file> [from-to]`, `/get <file>` | Show a file with line numbers, or download it |
+| `/find <name>`, `/grep <regex>` | Find files by name; search contents (`git grep`, falling back to `rg`) |
+| **Git** | |
+| `/git` | Branch, ahead/behind, staged/modified/untracked files, last commit |
+| `/diff [file\|staged\|turn]` | Working-tree diff (inline, or a `.diff` file when long); `turn` = the last agy turn only |
+| `/undo` | Revert the last agy turn's file changes (asks first; won't rewrite commits) |
+| `/log [n]`, `/branches` | Recent commits; branches by recency |
+| `/commit <msg>`, `/push`, `/pull` | Commit all, push (sets upstream if needed), fast-forward pull. Commit and push ask first. |
+| **Run** | |
+| `/test [cmd]` | Run tests (`/settest` per project, `TEST_COMMAND`, or auto-detect). Failures get a fix button. |
+| `/sh <cmd>`, `!<cmd>` | Run a shell command in the project (only with `ALLOW_SHELL=true`) |
+| **Shortcuts** | `/review /fix /explain /plan /commitmsg /pr /debug /tests /refactor /deps` + yours; `/prompts` lists them |
+| **Session** | |
+| `/new` | Fresh conversation for this project |
 | `/stop` | Interrupt the running turn and drop queued messages (the conversation is kept) |
-| `/status` | Working/idle, workspace, conversation id, model, mode, permissions, queue |
-| `/cwd [path]` | Show or switch the workspace (restricted to `ALLOWED_ROOTS`; starts a new conversation) |
-| `/ls` | List the workspace folder |
-| `/model [slug]`, `/models` | Show/set the model, or list them (`agy models`) |
-| `/effort [low\|medium\|high\|max\|default]` | Reasoning effort |
-| `/mode [default\|accept-edits\|auto\|plan]` | Execution mode |
-| `/yolo on\|off` | Toggle `--dangerously-skip-permissions` (only if `ALLOW_YOLO_TOGGLE=true`) |
+| `/retry`, `/last` | Rerun the last prompt; resend the last reply |
+| `/status` | Working/idle, project, branch, conversation, model, mode, permissions, test command |
 | `/resume <id>`, `/history` | Jump back to an earlier conversation |
-| `/usage` | `agy -p /usage` quota report |
-| `/whoami` | Your Telegram user id (works for anyone; reveals nothing else) |
+| `/export` | Transcript of this chat as Markdown (`/export this` = current conversation only) |
+| **Settings** | |
+| `/model [slug]`, `/models` | Show/set the model, or list them |
+| `/effort [low\|medium\|high\|max\|default]`, `/mode [default\|accept-edits\|auto\|plan]` | Reasoning effort, execution mode |
+| `/allow [rule]` | List agy's allow rules, add one (`/allow command(npm)`), or remove one (`/allow -command(npm)`) |
+| `/yolo on\|off` | Toggle `--dangerously-skip-permissions` (only if `ALLOW_YOLO_TOGGLE=true`) |
+| **Bridge** | `/usage`, `/logs`, `/restart`, `/update`, `/whoami` |
 
 Settings changes restart agy with new flags but keep the conversation.
 
@@ -85,7 +123,9 @@ Pick a level:
 
 - Only the Telegram user ids in `ALLOWED_USER_IDS` are served; everyone else is ignored and logged.
 - Your bot token is effectively a password to your PC. Never commit `.env` (it's git-ignored). If it leaks, use `/revoke` in @BotFather.
-- `/cwd` can't leave `ALLOWED_ROOTS`.
+- `/cwd`, `/projects`, `/cat`, `/get`, and `/ls` can't leave `ALLOWED_ROOTS`.
+- Direct shell (`/sh`, `!cmd`) is **off** unless you set `ALLOW_SHELL=true`. `/commit`, `/push`, and `/undo` always ask for a tap first.
+- Buttons only work for allowed users, and they expire after a while.
 - No inbound ports; the bridge only makes outbound HTTPS calls to `api.telegram.org`.
 - The bridge runs as your Windows user, so agy has your user's rights. Use a dedicated workspace folder.
 
@@ -126,6 +166,9 @@ All settings live in `.env`; see [`.env.example`](.env.example) for every option
 | Bot never answers | Check `data\bridge.log`; confirm your id with `/whoami`; make sure only **one** bridge runs per token |
 | agy "did nothing" | It was probably soft-denied; see Permissions above |
 | Weird behaviour with the persistent process | Set `RUN_MODE=oneshot` |
+| Diff/Undo buttons don't appear | The project isn't a git repo with at least one commit, or `CHECKPOINTS=false` |
+| Voice notes say a transcriber is needed | `.\.venv\Scripts\pip install faster-whisper`, then `/restart` |
+| Topics all share one agy | Turn on Topics in the group settings and make the bot an admin; each topic then gets its own session |
 | `/model` errors | Use a slug from `/models`; headless agy fails loudly on unknown models |
 
 ## Development

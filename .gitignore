@@ -9,3 +9,4 @@ dist/
 data/
 .pytest_cache/
 .telegram_uploads/
+prompts.toml

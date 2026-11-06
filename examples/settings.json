@@ -4,10 +4,15 @@
   "permissions": {
     "allow": [
       "command(git)",
-      "command(regex:npm (run|test|install).*)",
-      "command(regex:(py|python) -m pytest.*)",
+      "command(regex:npm (run|test|install|ci).*)",
+      "command(regex:pnpm .*)",
+      "command(regex:(py|python|python3) -m (pytest|pip|ruff|mypy).*)",
+      "command(regex:cargo (build|test|check|clippy|fmt).*)",
+      "command(regex:go (build|test|vet|mod).*)",
+      "command(regex:dotnet (build|test|restore).*)",
       "command(dir)",
-      "command(ls)"
+      "command(ls)",
+      "command(rg)"
     ]
   }
 }

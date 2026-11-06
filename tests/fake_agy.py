@@ -8,6 +8,8 @@ Behaviour is chosen by keywords in the prompt:
   permission -> prints a soft-deny notice on stderr
   long       -> returns a very long Markdown answer with a code block
   fail       -> returns status ERROR
+  write      -> edits README.md and creates new_file.txt in the cwd
+  denied     -> emits a run_command step that was soft-denied
 """
 import json
 import os
@@ -73,6 +75,15 @@ for line in sys.stdin:
         step -= 1
         step_update(state="DONE", step_type="tool", tool_name="run_command",
                     tool_info={"name": "run_command", "parameters": {"CommandLine": "echo hi"}, "output": "hi\r\n"})
+    if "write" in content:
+        with open("README.md", "a", encoding="utf-8") as fh:
+            fh.write("added by agy\n")
+        with open("new_file.txt", "w", encoding="utf-8") as fh:
+            fh.write("brand new\n")
+    if "denied" in content:
+        step_update(state="DONE", step_type="tool", tool_name="run_command",
+                    tool_info={"name": "run_command", "parameters": {"CommandLine": "npm.cmd test"},
+                               "error": {"type": "permission", "message": "soft-denied: permission required"}})
     if "long" in content:
         answer = "# Big answer\n\n" + "\n".join(f"Line {i} with **bold** text" for i in range(1200)) + "\n```python\n" + "\n".join(f"x{i} = {i}" for i in range(300)) + "\n```\n"
     else:

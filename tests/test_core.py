@@ -13,14 +13,16 @@ class FakeMessenger:
         self.edits = []
         self.deleted = []
         self.docs = []
+        self.buttons = []
         self._n = 0
 
-    async def send(self, html, plain=None):
+    async def send(self, html, plain=None, *, buttons=None, silent=False):
+        self.buttons.append(buttons)
         self._n += 1
         self.sent.append((html, plain))
         return self._n
 
-    async def edit(self, handle, html):
+    async def edit(self, handle, html, *, buttons=None):
         self.edits.append((handle, html))
 
     async def delete(self, handle):
@@ -35,7 +37,8 @@ class FakeMessenger:
 
 def make(tmp_path, fake_cmd, **over):
     env = {"TELEGRAM_BOT_TOKEN": "1:x", "ALLOWED_USER_IDS": "1", "AGY_WORKDIR": str(tmp_path),
-           "STATE_FILE": str(tmp_path / "state.json"), "EDIT_INTERVAL_SECONDS": "0", **over}
+           "STATE_FILE": str(tmp_path.parent / f"{tmp_path.name}-state.json"), "EDIT_INTERVAL_SECONDS": "0",
+           "TRANSCRIPT_DIR": str(tmp_path.parent / f"{tmp_path.name}-transcripts"), **over}
     cfg = Config.from_env(env)
     cfg.agy_command = fake_cmd
     store = StateStore(cfg.state_file)
@@ -57,7 +60,7 @@ async def test_turn_flow_and_state_persisted(tmp_path, fake_cmd):
     assert m.deleted == [1]  # status bubble removed when no tools ran
     conv = w.state.conversation_id
     assert conv
-    assert conv in (tmp_path / "state.json").read_text()
+    assert conv in w.config.state_file.read_text()
     await w.submit("second")
     await drain(w)
     assert any("(turn 2" in h for h, _ in m.sent)
@@ -102,7 +105,7 @@ async def test_error_and_permission_notice(tmp_path, fake_cmd):
     assert any("agy error" in h and "simulated crash" in h for h, _ in m.sent)
     await w.submit("permission please")
     await drain(w)
-    assert any("Permission notices" in h for h, _ in m.sent)
+    assert any("blocked from using a tool" in h for h, _ in m.sent)
     await w.submit("fail please")
     await drain(w)
     assert any("simulated failure" in h for h, _ in m.sent)
@@ -149,4 +152,95 @@ async def test_oneshot_mode(tmp_path, fake_cmd):
     await w.submit("y")
     await drain(w)
     assert any("You said: y" in h for h, _ in m.sent)
+    await w.shutdown()
+
+
+def _git_repo(path):
+    import subprocess
+
+    def g(*a):
+        subprocess.run(["git", *a], cwd=path, check=True, capture_output=True)
+    g("init", "-q")
+    g("config", "user.email", "t@example.com")
+    g("config", "user.name", "t")
+    (path / "README.md").write_text("hello\n")
+    (path / "mine.txt").write_text("user's untracked file\n")
+    g("add", "README.md")
+    g("commit", "-q", "-m", "init")
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_changes_and_undo(tmp_path, fake_cmd):
+    from agy_bridge import gitops
+
+    _git_repo(tmp_path)
+    w, m, _ = make(tmp_path, fake_cmd)
+    await w.submit("please write something")
+    await drain(w)
+    rec = w.last_turn
+    assert rec.checkpoint is not None
+    paths = {p for _, p in rec.changes.files}
+    assert {"README.md", "new_file.txt"} <= paths
+    assert paths == {"README.md", "new_file.txt"}
+    assert any("files changed" in h for h, _ in m.sent)
+    labels = [b[0] for row in (m.buttons[-1] or []) for b in row]
+    assert "↩️ Undo" in labels and "📄 Diff" in labels
+    diff = await gitops.diff_since(rec.checkpoint)
+    assert "added by agy" in diff and "brand new" in diff
+    ok, msg = await gitops.undo(rec.checkpoint)
+    assert ok, msg
+    assert (tmp_path / "README.md").read_text() == "hello\n"
+    assert not (tmp_path / "new_file.txt").exists()
+    assert (tmp_path / "mine.txt").exists()  # pre-existing untracked file kept
+    await w.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_denied_tool_offers_rule_and_approval(tmp_path, fake_cmd):
+    w, m, _ = make(tmp_path, fake_cmd)
+    await w.submit("denied tool")
+    await drain(w)
+    assert w.last_turn.denied_rules == ["command(npm)"]
+    labels = [b[0] for rows in m.buttons if rows for row in rows for b in row]
+    assert any("Always allow command(npm)" in l for l in labels)
+    assert any("full access" in l for l in labels)
+    await w.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_per_turn_override_restarts_and_reverts(tmp_path, fake_cmd, monkeypatch):
+    from agy_bridge.core import Job
+
+    log = tmp_path / "argv.log"
+    monkeypatch.setenv("FAKE_AGY_LOG", str(log))
+    w, m, _ = make(tmp_path, fake_cmd)
+    await w.submit("a")
+    await w.submit(Job(prompt="b", overrides={"skip_permissions": True, "mode": "plan"}))
+    await w.submit("c")
+    await drain(w)
+    lines = log.read_text().splitlines()
+    assert len(lines) == 3
+    assert "--dangerously-skip-permissions" not in lines[0]
+    assert "--dangerously-skip-permissions" in lines[1] and "plan" in lines[1]
+    assert "--dangerously-skip-permissions" not in lines[2]
+    assert w.transcript.last_reply().startswith("You said: c")
+    await w.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_switch_workspace_keeps_per_project_conversations(tmp_path, fake_cmd):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    w, m, _ = make(tmp_path, fake_cmd, ALLOWED_ROOTS=str(tmp_path))
+    await w.switch_workspace(a)
+    await w.submit("in a")
+    await drain(w)
+    conv_a = w.state.conversation_id
+    assert await w.switch_workspace(b) == ""
+    await w.submit("in b")
+    await drain(w)
+    assert w.state.conversation_id != conv_a
+    assert any("cwd b" in h for h, _ in m.sent)
+    assert await w.switch_workspace(a) == conv_a
     await w.shutdown()

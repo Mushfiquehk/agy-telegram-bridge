@@ -1,0 +1,21 @@
+# Copy to prompts.toml (next to .env) and /restart the bridge.
+# Each [shortcuts.<name>] becomes a Telegram command /<name>.
+# {args} = text after the command (or the message you replied to); {cwd} = project folder.
+# mode = "plan" | "accept-edits" | "auto" runs just that turn in that agy mode.
+
+[shortcuts.docs]
+description = "Update docs for recent changes"
+prompt = "Read the last few commits and the current diff, then update README.md and any docs to match. {args}"
+
+[shortcuts.lint]
+description = "Run the linter and fix issues"
+prompt = "Run the project's linter/formatter (eslint, ruff, clippy, etc.), fix what it reports, and summarize. {args}"
+
+[shortcuts.security]
+description = "Security review (no edits)"
+mode = "plan"
+prompt = "Do a security review of {args} (or the whole repo if nothing is named): injection, auth, secrets, unsafe deserialization, path traversal. Report findings by severity with file:line. Don't edit files."
+
+[shortcuts.ship]
+description = "Test, commit and push"
+prompt = "Run the tests. If they pass, commit all changes with a good conventional commit message and push the current branch. If they fail, stop and tell me why. {args}"

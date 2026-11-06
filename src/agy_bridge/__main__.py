@@ -82,8 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(args.verbose)
     from .bot import run
 
-    run(config)
-    return 0
+    return run(config)
 
 
 if __name__ == "__main__":

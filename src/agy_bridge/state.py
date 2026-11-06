@@ -22,6 +22,15 @@ class ChatState:
     mode: str = ""
     yolo: bool | None = None  # None = use config default
     history: list[str] = field(default_factory=list)  # recent conversation ids
+    conversations: dict[str, str] = field(default_factory=dict)  # workspace -> last conversation id
+    test_commands: dict[str, str] = field(default_factory=dict)  # workspace -> test command
+    recent_projects: list[str] = field(default_factory=list)
+
+    def remember_project(self, path: str, keep: int = 8) -> None:
+        if path in self.recent_projects:
+            self.recent_projects.remove(path)
+        self.recent_projects.insert(0, path)
+        del self.recent_projects[keep:]
 
     def remember_conversation(self, conv_id: str, keep: int = 10) -> None:
         if not conv_id:
