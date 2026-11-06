@@ -29,6 +29,18 @@ def _bool(value: str | None, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
+def _ids(raw: str) -> list[int]:
+    out = []
+    for part in raw.replace(" ", "").replace(";", ",").split(","):
+        if not part:
+            continue
+        try:
+            out.append(int(part))
+        except ValueError as exc:
+            raise ConfigError(f"user ids must be integers, got {part!r}") from exc
+    return out
+
+
 def _int(name: str, value: str | None, default: int) -> int:
     if value is None or value.strip() == "":
         return default
@@ -102,6 +114,8 @@ class Config:
     voice_language: str = ""
     voice_confirm: bool = False
     project_scan_depth: int = 3
+    max_parallel_tasks: int = 3
+    viewer_user_ids: frozenset[int] = frozenset()
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None, dotenv_path: str | None = None) -> "Config":
@@ -184,6 +198,8 @@ class Config:
             voice_language=env.get("VOICE_LANGUAGE", "").strip(),
             voice_confirm=_bool(env.get("VOICE_CONFIRM")),
             project_scan_depth=_int("PROJECT_SCAN_DEPTH", env.get("PROJECT_SCAN_DEPTH"), 3),
+            max_parallel_tasks=_int("MAX_PARALLEL_TASKS", env.get("MAX_PARALLEL_TASKS"), 3),
+            viewer_user_ids=frozenset(_ids(env.get("VIEWER_USER_IDS", ""))),
         )
 
     def is_path_allowed(self, path: Path) -> bool:

@@ -46,6 +46,7 @@ class StateStore:
         self.path = Path(path)
         self._lock = threading.Lock()
         self._chats: dict[str, ChatState] = {}
+        self.extras: dict[str, list] = {"tasks": [], "schedules": []}  # raw dicts owned by bot.py
         self._load()
 
     def _load(self) -> None:
@@ -57,6 +58,9 @@ class StateStore:
             log.exception("could not read %s; starting fresh", self.path)
             return
         known = set(ChatState.__dataclass_fields__)
+        for name in ("tasks", "schedules"):
+            if isinstance(data.get(name), list):
+                self.extras[name] = data[name]
         for chat_id, raw in (data.get("chats") or {}).items():
             if isinstance(raw, dict):
                 self._chats[chat_id] = ChatState(**{k: v for k, v in raw.items() if k in known})
@@ -70,7 +74,7 @@ class StateStore:
 
     def save(self) -> None:
         with self._lock:
-            payload = {"version": 1, "chats": {k: asdict(v) for k, v in self._chats.items()}}
+            payload = {"version": 1, "chats": {k: asdict(v) for k, v in self._chats.items()}, **self.extras}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), prefix=".state-", suffix=".json")
         try:

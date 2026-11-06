@@ -52,7 +52,7 @@ BUILTIN: dict[str, Shortcut] = {s.name: s for s in [
     Shortcut("commitmsg", "Write a commit message and commit",
              "Look at the staged and unstaged changes (`git status`, `git diff HEAD`), stage the ones that belong together, "
              "and commit them with a clear conventional commit message. Don't push. Show me the message you used. {args}"),
-    Shortcut("pr", "Prepare a pull request description",
+    Shortcut("prdesc", "Write a pull request description",
              "Compare this branch to the default branch (git log and git diff against origin's default branch) and write "
              "a pull request title and description: summary, changes, testing, risks. Don't push or open anything. {args}"),
     Shortcut("debug", "Investigate an error or stack trace",

@@ -68,6 +68,23 @@ More things that help:
 - **Shortcuts.** `/review`, `/fix`, `/explain <x>`, `/plan <task>` (runs in plan mode, so no edits), `/commitmsg`, `/pr`, `/debug <error>`, `/tests <x>`, `/refactor <x>`, `/deps`. Add your own in `prompts.toml` (see [`prompts.example.toml`](prompts.example.toml)). Reply to any message with a shortcut to include that message.
 - **Remote upkeep.** `/logs` shows the bridge log, `/restart` restarts it, and `/update` pulls the latest bridge from git, reinstalls, and restarts. These need `run.ps1` or the autostart task, which restart it automatically.
 
+## Background tasks, PRs and CI
+
+Like Codex cloud tasks, without the cloud:
+
+- `/task add pagination to the users endpoint` creates a branch `agy/add-pagination-…` in its own **git worktree** next to the repo, then runs a separate agy there. Your checkout and the main chat stay free, and several tasks can run at once (`MAX_PARALLEL_TASKS`).
+- Reply to any of a task's messages to steer it. When it finishes, the bridge commits the work to the task branch and gives you **📄 Diff**, **🔀 Merge**, **⬆️ Open PR**, and **🗑 Discard** buttons. `/tasks` lists them all.
+- `/pr [title]` pushes the current branch and opens a draft PR. After `/push` or a PR, the bridge **watches CI** and pings you with the result. A failure gets **🛠 Ask agy to fix CI**, which passes along the failed job's log. `/ci` shows the runs for the current branch. These features need the [GitHub CLI](https://cli.github.com/) (`winget install GitHub.cli`, then `gh auth login`). Without it, `/pr` sends a compare link.
+
+## Plans, schedules, queue
+
+- `/plan <task>` runs in plan mode (no edits). The reply has **✅ Implement this plan**.
+- `/at 09:00 summarize yesterday's commits and open TODOs` (daily) or `/every 6h run the tests and tell me if anything broke`. Manage them with `/schedules`. Schedules use the PC's local time.
+- Messages sent while agy is busy are queued. The queued notice has **⚡ Stop current & run this**. `/queue` lets you cancel or reorder.
+- `/sessions` shows your recent conversations by their first prompt. Tap one to continue it.
+- If agy's reply mentions files that exist (`report.csv`, `screenshot.png`), you get **📎** buttons to download them.
+- `VIEWER_USER_IDS` gives teammates read-only access to status, diffs, logs, tasks, and CI.
+
 ## Commands
 
 | Command | What it does |
@@ -91,11 +108,16 @@ More things that help:
 | **Run** | |
 | `/test [cmd]` | Run tests (`/settest` per project, `TEST_COMMAND`, or auto-detect). Failures get a fix button. |
 | `/sh <cmd>`, `!<cmd>` | Run a shell command in the project (only with `ALLOW_SHELL=true`) |
-| **Shortcuts** | `/review /fix /explain /plan /commitmsg /pr /debug /tests /refactor /deps` + yours; `/prompts` lists them |
+| **Shortcuts** | `/review /fix /explain /plan /commitmsg /prdesc /debug /tests /refactor /deps` + yours; `/prompts` lists them |
+| **Background tasks & GitHub** | |
+| `/task <prompt>`, `/tasks` | Run agy on its own branch and worktree; Diff / Merge / PR / Discard when done |
+| `/pr [title]`, `/ci` | Push and open a draft PR (CI watched afterwards); CI runs for this branch |
 | **Session** | |
 | `/new` | Fresh conversation for this project |
 | `/stop` | Interrupt the running turn and drop queued messages (the conversation is kept) |
 | `/retry`, `/last` | Rerun the last prompt; resend the last reply |
+| `/queue`, `/sessions` | Cancel or reorder queued prompts; pick a recent conversation |
+| `/at HH:MM <prompt>`, `/every 2h <prompt>`, `/schedules` | Scheduled prompts |
 | `/status` | Working/idle, project, branch, conversation, model, mode, permissions, test command |
 | `/resume <id>`, `/history` | Jump back to an earlier conversation |
 | `/export` | Transcript of this chat as Markdown (`/export this` = current conversation only) |

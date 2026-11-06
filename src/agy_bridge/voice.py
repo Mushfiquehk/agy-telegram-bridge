@@ -28,7 +28,8 @@ class VoiceUnavailable(RuntimeError):
 
 def _has_faster_whisper() -> bool:
     try:
-        import faster_whisper  # noqa: F401
+        import faster_whisper  # noqa: F401  # pyflakes: ignore
+        del faster_whisper
     except ImportError:
         return False
     return True

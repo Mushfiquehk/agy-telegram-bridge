@@ -37,6 +37,8 @@ RULE_RE = re.compile(r"\b(?:command|read|write|edit|mcp|tool|url|web)\([^()\s][^
 MAX_INLINE_CHUNKS = 5
 
 Buttons = list[list[tuple[str, str]]]  # rows of (label, callback data)
+_JOB_IDS = itertools.count(1)
+FILE_MENTION_RE = re.compile(r"`([^`\n]{1,200}\.[A-Za-z0-9]{1,8})`|(?<![\w/\\.])((?:[\w.-]+[/\\])*[\w.-]+\.(?:png|jpe?g|gif|webp|svg|pdf|csv|xlsx|zip|html|log|txt|md|diff|patch))\b")
 
 
 class Messenger(Protocol):
@@ -53,6 +55,8 @@ class Job:
     overrides: dict[str, Any] = field(default_factory=dict)  # AgyOptions fields for this turn only
     label: str = ""  # short description shown in the status header (e.g. "/review")
     display: str = ""  # what to log as the user's prompt (defaults to prompt)
+    cancelled: bool = False
+    id: int = field(default_factory=lambda: next(_JOB_IDS))
 
 
 @dataclass
@@ -64,6 +68,7 @@ class TurnRecord:
     changes: gitops.ChangeSummary | None = None
     denied_rules: list[str] = field(default_factory=list)
     undone: bool = False
+    response: str = ""
 
 
 class ChatWorker:
@@ -86,6 +91,8 @@ class ChatWorker:
         self.actions: dict[str, tuple[str, Any]] = {}  # callback token -> (action, payload)
         self._tokens = itertools.count(1)
         self.transcript = Transcript(config.transcript_dir, self.key)
+        self.on_turn_done: Any = None  # async callable(worker, record, ok) after each turn
+        self.title: str = ""  # shown in status headers for background tasks
 
     # ----------------------------------------------------------------- settings
     @property
@@ -137,6 +144,17 @@ class ChatWorker:
         await self.queue.put(job)
         self.ensure_running()
         return ahead
+
+    def pending(self) -> list[Job]:
+        """Queued jobs that haven't started (oldest first)."""
+        return [j for j in list(getattr(self.queue, "_queue", [])) if not j.cancelled]
+
+    def cancel_job(self, job_id: int) -> bool:
+        for j in self.pending():
+            if j.id == job_id:
+                j.cancelled = True
+                return True
+        return False
 
     async def stop_turn(self, clear_queue: bool = True) -> tuple[bool, int]:
         """Interrupt the running turn. Returns (was_running, dropped_queued)."""
@@ -222,6 +240,9 @@ class ChatWorker:
                 continue
             except asyncio.CancelledError:
                 return
+            if job.cancelled:
+                self.queue.task_done()
+                continue
             try:
                 await self._run_turn(job)
             except asyncio.CancelledError:
@@ -259,7 +280,8 @@ class ChatWorker:
                 log.exception("checkpoint failed")
         self.transcript.add("user", job.display or job.prompt, cwd=str(self.cwd), conversation=self.state.conversation_id)
 
-        presenter = TurnPresenter(self, label=job.label)
+        label = " · ".join(x for x in (self.title, job.label) if x)
+        presenter = TurnPresenter(self, label=label)
         await presenter.begin()
         typing_task = asyncio.create_task(_keep_typing(self.messenger))
         result = None
@@ -297,28 +319,64 @@ class ChatWorker:
                 log.exception("change summary failed")
         self.last_turn = record
 
+        ok = False
         if self._stopping:
             self._stopping = False
             await presenter.finish_stopped(record)
             self.transcript.add("agy", "(stopped)", conversation=self.state.conversation_id)
-            return
-        if result is not None:
+        elif result is not None:
+            record.response = result.response or ""
             await presenter.finish_result(result, notices, record)
             self.transcript.add("agy", result.response or "", conversation=self.state.conversation_id, status=result.status)
+            ok = result.status == "SUCCESS"
         else:
             message = error.error if error else "agy ended unexpectedly"
             await presenter.finish_error(message, notices, record)
             self.transcript.add("agy", f"(error) {message}", conversation=self.state.conversation_id)
+        if self.on_turn_done is not None:
+            try:
+                await self.on_turn_done(self, record, ok)
+            except Exception:
+                log.exception("on_turn_done hook failed")
 
     # ------------------------------------------------------------------ buttons
+    def mentioned_files(self, text: str, limit: int = 3) -> list[Path]:
+        """Existing files in the project that the reply mentions by path."""
+        out: list[Path] = []
+        root = self.cwd.resolve()
+        for m in FILE_MENTION_RE.finditer(text or ""):
+            cand = (m.group(1) or m.group(2) or "").strip().strip("'\"")
+            if not cand or "://" in cand:
+                continue
+            p = Path(cand)
+            p = p if p.is_absolute() else root / p
+            try:
+                p = p.resolve()
+                p.relative_to(root)
+            except (OSError, ValueError):
+                continue
+            if p.is_file() and p not in out and p.stat().st_size < 50 * 1024 * 1024:
+                out.append(p)
+            if len(out) >= limit:
+                break
+        return out
+
     def reply_buttons(self, record: TurnRecord) -> Buttons:
+        rows: Buttons = []
+        if record.job.overrides.get("mode") == "plan" or (self.options().mode == "plan" and not record.job.overrides):
+            rows.append([("✅ Implement this plan", self.action_token("implement_plan"))])
+        files = self.mentioned_files(record.response)
+        if files:
+            rows.append([(f"📎 {p.name}"[:28], self.action_token("send_file", str(p))) for p in files])
         row: list[tuple[str, str]] = []
         if record.changes and not record.changes.empty:
             row.append(("📄 Diff", self.action_token("diff")))
             if not record.changes.head_moved:
                 row.append(("↩️ Undo", self.action_token("undo")))
         row.append(("🔁 Retry", self.action_token("retry")))
-        return [row]
+        if self.on_turn_done is None:  # background tasks get their own buttons
+            rows.append(row)
+        return rows
 
     def approval_buttons(self, record: TurnRecord) -> Buttons:
         rows: Buttons = []

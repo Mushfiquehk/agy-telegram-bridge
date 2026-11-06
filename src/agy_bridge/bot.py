@@ -24,10 +24,11 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, agysettings, gitops, projects, voice
+from . import __version__, agysettings, ghcli, gitops, projects, voice
 from .agy import run_simple
 from .config import VALID_EFFORTS, VALID_MODES, Config
 from .core import Buttons, ChatWorker, Job
+from .features import FeaturesMixin
 from .procs import ProcResult, run_shell
 from .prompts import all_shortcuts
 from .state import StateStore
@@ -53,16 +54,23 @@ Type anything: it goes to <code>agy</code> on your PC in the current project, sa
 /git – status · /diff [file|staged|turn] · /log [n] · /branches
 /undo – revert the last agy turn's changes · /commit &lt;msg&gt; · /push · /pull
 
+<b>Background tasks</b> (own branch + worktree, run in parallel)
+/task &lt;what to do&gt; – reply to its messages to steer · /tasks – Diff / Merge / PR / Discard
+
+<b>GitHub</b> (needs the gh CLI)
+/pr [title] – push + open a draft PR · /ci – runs for this branch (CI is watched after every push)
+
 <b>Run</b>
 /test [cmd] – run tests (failures → one tap to have agy fix them)
 /settest &lt;cmd&gt; – set this project's test command
 /sh &lt;cmd&gt; or <code>!cmd</code> – run a shell command (if ALLOW_SHELL=true)
 
 <b>Shortcuts</b> (/prompts lists all, incl. your prompts.toml)
-/review · /fix · /explain [x] · /plan &lt;task&gt; · /commitmsg · /pr · /debug &lt;error&gt; · /tests &lt;x&gt; · /refactor &lt;x&gt; · /deps
+/review · /fix · /explain [x] · /plan &lt;task&gt; (then ✅ Implement) · /commitmsg · /prdesc · /debug &lt;error&gt; · /tests &lt;x&gt; · /refactor &lt;x&gt; · /deps
 
 <b>Session</b>
-/new · /stop · /retry · /status · /last · /export · /resume &lt;id&gt; · /history
+/new · /stop · /retry · /queue · /sessions · /status · /last · /export
+/at 09:00 &lt;prompt&gt; · /every 2h &lt;prompt&gt; · /schedules
 
 <b>Settings</b>
 /model [slug] · /models · /effort [..] · /mode [default|accept-edits|auto|plan]
@@ -92,10 +100,19 @@ def pre(text: str, lang: str = "") -> str:
 class TelegramMessenger:
     """Implements core.Messenger on top of a Telegram chat (optionally a forum topic)."""
 
-    def __init__(self, app: Application, chat_id: int, thread_id: int | None = None) -> None:
+    def __init__(self, app: Application, chat_id: int, thread_id: int | None = None, on_sent=None) -> None:
         self.bot = app.bot
         self.chat_id = chat_id
         self.thread_id = thread_id
+        self.on_sent = on_sent  # callback(message) so replies can be routed back to this worker
+
+    def _track(self, msg):
+        if msg is not None and self.on_sent is not None:
+            try:
+                self.on_sent(msg)
+            except Exception:
+                pass
+        return msg
 
     def _where(self) -> dict[str, Any]:
         d: dict[str, Any] = {"chat_id": self.chat_id}
@@ -117,17 +134,17 @@ class TelegramMessenger:
 
     async def send(self, html_text: str, plain: str | None = None, *, buttons: Buttons | None = None, silent: bool = False) -> Message | None:
         try:
-            return await self._retry(
+            return self._track(await self._retry(
                 self.bot.send_message, **self._where(), text=html_text, parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True, reply_markup=kb(buttons), disable_notification=silent,
-            )
+            ))
         except BadRequest as exc:
             log.warning("HTML rejected (%s); sending plain text", exc)
             text = plain if plain is not None else html.unescape(re.sub(r"<[^>]+>", "", html_text))
-            return await self._retry(
+            return self._track(await self._retry(
                 self.bot.send_message, **self._where(), text=text[:4096] or "…",
                 disable_web_page_preview=True, reply_markup=kb(buttons), disable_notification=silent,
-            )
+            ))
 
     async def edit(self, handle: Message | None, html_text: str, *, buttons: Buttons | None = None) -> None:
         if handle is None:
@@ -154,16 +171,16 @@ class TelegramMessenger:
             pass
 
     async def send_document(self, data: bytes, filename: str, caption: str = "", buttons: Buttons | None = None) -> None:
-        await self._retry(
+        self._track(await self._retry(
             self.bot.send_document, **self._where(), document=data, filename=filename,
             caption=caption[:1000], reply_markup=kb(buttons),
-        )
+        ))
 
     async def typing(self) -> None:
         await self.bot.send_chat_action(**self._where(), action=ChatAction.TYPING)
 
 
-class Bridge:
+class Bridge(FeaturesMixin):
     def __init__(self, config: Config) -> None:
         self.config = config
         self.store = StateStore(config.state_file)
@@ -172,6 +189,8 @@ class Bridge:
         self.exit_code = 0
         self.shortcuts = all_shortcuts(config.prompts_file)
         self._project_cache: tuple[float, list[Path]] = (0.0, [])
+        self.msg_owner: dict[tuple[int, int], str] = {}  # (chat, message id) -> worker key
+        self._init_features()
 
     # ----------------------------------------------------------------- helpers
     @staticmethod
@@ -181,12 +200,33 @@ class Bridge:
         thread = msg.message_thread_id if msg is not None and getattr(msg, "is_topic_message", False) else None
         return chat.id, thread, f"{chat.id}:{thread}" if thread else str(chat.id)
 
-    def worker(self, update: Update) -> ChatWorker:
-        chat_id, thread, key = self._key(update)
+    def make_worker(self, chat_id: int, thread: int | None, key: str) -> ChatWorker:
         if key not in self.workers:
             assert self.app is not None
-            self.workers[key] = ChatWorker(chat_id, self.config, self.store, TelegramMessenger(self.app, chat_id, thread), key=key)
+
+            def on_sent(msg, key=key, chat_id=chat_id):
+                self.msg_owner[(chat_id, msg.message_id)] = key
+                if len(self.msg_owner) > 5000:
+                    for k in list(self.msg_owner)[:1000]:
+                        self.msg_owner.pop(k, None)
+
+            m = TelegramMessenger(self.app, chat_id, thread, on_sent=on_sent)
+            self.workers[key] = ChatWorker(chat_id, self.config, self.store, m, key=key)
         return self.workers[key]
+
+    def worker(self, update: Update) -> ChatWorker:
+        chat_id, thread, key = self._key(update)
+        return self.make_worker(chat_id, thread, key)
+
+    def worker_for_reply(self, update: Update) -> ChatWorker:
+        """The worker that sent the message being replied to (e.g. a background task), else this chat's."""
+        msg = update.effective_message
+        r = msg.reply_to_message if msg else None
+        if r is not None:
+            key = self.msg_owner.get((update.effective_chat.id, r.message_id))
+            if key and key in self.workers:
+                return self.workers[key]
+        return self.worker(update)
 
     def messenger(self, update: Update) -> TelegramMessenger:
         return self.worker(update).messenger  # type: ignore[return-value]
@@ -246,6 +286,9 @@ class Bridge:
         )
         self.app = app
         allowed = filters.User(user_id=list(self.config.allowed_user_ids))
+        viewers = filters.User(user_id=list(self.config.allowed_user_ids | set(self.config.viewer_user_ids)))
+        read_only = {"help", "start", "status", "git", "diff", "log", "branches", "ls", "tree", "cat", "find",
+                     "grep", "tasks", "ci", "queue", "history", "sessions", "schedules", "prompts"}
 
         app.add_handler(CommandHandler("whoami", self.cmd_whoami))  # open to anyone: only echoes their id
         cmds = {
@@ -263,18 +306,22 @@ class Bridge:
             "mode": self.cmd_mode, "yolo": self.cmd_yolo, "allow": self.cmd_allow, "resume": self.cmd_resume,
             "history": self.cmd_history, "usage": self.cmd_usage,
             "logs": self.cmd_logs, "restart": self.cmd_restart, "update": self.cmd_update,
+            "task": self.cmd_task, "tasks": self.cmd_tasks, "pr": self.cmd_pr, "ci": self.cmd_ci,
+            "every": self.cmd_every, "at": self.cmd_at, "schedules": self.cmd_schedules,
+            "sessions": self.cmd_sessions, "queue": self.cmd_queue,
         }
         for name in self.shortcuts:
             if name not in cmds:
                 cmds[name] = self.cmd_shortcut
         for name, fn in cmds.items():
-            app.add_handler(CommandHandler(name, fn, filters=allowed))
+            app.add_handler(CommandHandler(name, fn, filters=viewers if name in read_only else allowed))
         app.add_handler(CallbackQueryHandler(self.on_button))
         app.add_handler(MessageHandler(allowed & (filters.Document.ALL | filters.PHOTO), self.on_file))
         app.add_handler(MessageHandler(allowed & (filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE), self.on_voice))
         app.add_handler(MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, self.on_text))
         app.add_handler(MessageHandler(allowed & filters.COMMAND, self.on_unknown_command))
-        app.add_handler(MessageHandler(~allowed, self.on_stranger))
+        app.add_handler(MessageHandler(viewers & ~allowed, self.on_viewer))
+        app.add_handler(MessageHandler(~viewers, self.on_stranger))
         app.add_error_handler(self.on_error)
         return app
 
@@ -285,12 +332,15 @@ class Bridge:
             ("projects", "Switch project"), ("git", "Git status"), ("diff", "Show changes"),
             ("undo", "Undo last agy turn"), ("test", "Run tests"), ("review", "Review my changes"),
             ("fix", "Fix failing tests"), ("plan", "Plan a task (no edits)"), ("new", "Fresh conversation"),
+            ("task", "Background task on its own branch"), ("tasks", "Background tasks"),
             ("stop", "Stop the running turn"), ("retry", "Retry last prompt"), ("status", "Session status"),
-            ("commit", "Commit all changes"), ("push", "Push"), ("cat", "Show a file"), ("get", "Download a file"),
+            ("commit", "Commit all changes"), ("push", "Push"), ("pr", "Open a pull request"), ("ci", "CI status"),
+            ("sessions", "Pick a conversation"), ("queue", "Queued prompts"), ("schedules", "Scheduled prompts"), ("cat", "Show a file"), ("get", "Download a file"),
             ("sh", "Run a shell command"), ("model", "Show/set model"), ("mode", "Show/set mode"),
             ("allow", "agy permission rules"), ("prompts", "All shortcuts"), ("help", "Help"),
         ]
         await app.bot.set_my_commands([BotCommand(c, d) for c, d in menu])
+        self._spawn(self._scheduler())
         for uid in self.config.allowed_user_ids:
             try:
                 await app.bot.send_message(
@@ -314,6 +364,12 @@ class Bridge:
         if text.startswith("!") and len(text) > 1:
             await self._shell(update, text[1:].strip())
             return
+        target = self.worker_for_reply(update)
+        if target is not self.worker(update):
+            # a reply to a background task's message steers that task
+            ahead = await target.submit(Job(prompt=text, display=msg.text))
+            await self.reply(update, f"🧵 Sent to {esc(target.title or target.key)}" + (f" (queued, {ahead} ahead)" if ahead else ""))
+            return
         if msg.reply_to_message and (msg.reply_to_message.text or msg.reply_to_message.caption):
             quoted = (msg.reply_to_message.text or msg.reply_to_message.caption or "")[:2000]
             text = "(Replying to this earlier message:)\n> " + quoted.replace("\n", "\n> ") + f"\n\n{text}"
@@ -323,7 +379,9 @@ class Bridge:
         w = self.worker(update)
         ahead = await w.submit(job)
         if ahead:
-            await self.reply(update, f"📥 Queued ({ahead} ahead). /stop cancels the current turn.")
+            await self.reply(update, f"📥 Queued ({ahead} ahead). /queue to manage.",
+                             [[("⚡ Stop current & run this", w.action_token("interrupt_with", job.id)),
+                               ("✖️ Cancel", w.action_token("cancel_job", job.id))]])
 
     async def _save_upload(self, w: ChatWorker, tg_file_ref, name: str) -> Path:
         dest_dir = w.cwd / ".telegram_uploads"
@@ -395,6 +453,9 @@ class Bridge:
 
     async def on_unknown_command(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await self.reply(update, "Unknown command. /help lists them; anything without a slash goes to agy.")
+
+    async def on_viewer(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        await self.reply(update, "👀 You have read-only access: /status, /git, /diff, /log, /cat, /tasks, /ci … Only the owner can prompt agy.")
 
     async def on_stranger(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -507,7 +568,11 @@ class Bridge:
         args = ["push", "-u", "origin", "HEAD"] if set_upstream else ["push"]
         await self.reply(update, "⬆️ Pushing…")
         r = await gitops.git(root, *args, timeout=180)
-        await self.send_output(update, "✅ <b>Pushed</b>" if r.ok else "❌ <b>Push failed</b>", r.out)
+        note = "\n<i>I'll report back when CI finishes.</i>" if r.ok and ghcli.available() else ""
+        await self.send_output(update, ("✅ <b>Pushed</b>" + note) if r.ok else "❌ <b>Push failed</b>", r.out)
+        if r.ok:
+            br = await gitops.git(root, "rev-parse", "--abbrev-ref", "HEAD")
+            self._spawn(self._watch_ci(update, root, br.out.strip()))
 
     async def act_project(self, update, w: ChatWorker, payload) -> None:
         await self._switch(update, w, Path(payload))
@@ -1076,7 +1141,12 @@ class Bridge:
         arg = (ctx.args[0].strip() if ctx.args else "")
         current = getattr(w.options(), field) or "default"
         if not arg:
-            await self.reply(update, f"{label}: <code>{esc(current)}</code>")
+            buttons = None
+            if valid is not None:
+                opts = sorted(valid - {""}) + ["default"]
+                buttons = [[((("● " if (v == current) else "") + v), w.action_token("set_opt", (field, "" if v == "default" else v))) for v in opts[i:i + 3]]
+                           for i in range(0, len(opts), 3)]
+            await self.reply(update, f"{label}: <code>{esc(current)}</code>", buttons)
             return
         value = "" if arg.lower() == "default" else arg
         if valid is not None and value not in valid:
